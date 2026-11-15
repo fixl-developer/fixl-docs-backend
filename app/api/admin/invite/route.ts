@@ -13,6 +13,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'email is required' }, { status: 400 })
   }
 
+  if (body.role && !['employee', 'manager'].includes(body.role)) {
+    return NextResponse.json({ error: 'Invalid invite role' }, { status: 400 })
+  }
   const supabase = createServiceClient()
   const { data, error } = await supabase.auth.admin.inviteUserByEmail(body.email, {
     data: {

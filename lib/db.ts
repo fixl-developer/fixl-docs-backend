@@ -1,6 +1,14 @@
 import { createClient } from '@supabase/supabase-js'
 import type { Snippet } from '@/types/snippet'
-import type { Profile, Project, ProjectMember, Document, DocumentVersion, ViewLog, Kudos } from '@/types/platform'
+import type {
+  Profile,
+  Project,
+  ProjectMember,
+  Document,
+  DocumentVersion,
+  ViewLog,
+  Kudos,
+} from '@/types/platform'
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -14,7 +22,7 @@ export async function insertSnippet(
   storageKey: string,
   fileSize: number,
   ipHash: string | null,
-  title: string | null
+  title: string | null,
 ): Promise<Snippet> {
   const { data, error } = await supabase
     .from('snippets')
@@ -27,11 +35,7 @@ export async function insertSnippet(
 }
 
 export async function getSnippetBySlug(slug: string): Promise<Snippet | null> {
-  const { data, error } = await supabase
-    .from('snippets')
-    .select('*')
-    .eq('slug', slug)
-    .single()
+  const { data, error } = await supabase.from('snippets').select('*').eq('slug', slug).single()
 
   if (error) return null
   return data as Snippet
@@ -40,11 +44,7 @@ export async function getSnippetBySlug(slug: string): Promise<Snippet | null> {
 // ─── Profiles ────────────────────────────────────────────────────────────────
 
 export async function getProfile(userId: string): Promise<Profile | null> {
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('*')
-    .eq('id', userId)
-    .single()
+  const { data, error } = await supabase.from('profiles').select('*').eq('id', userId).single()
   if (error) return null
   return data as Profile
 }
@@ -60,7 +60,7 @@ export async function listProfiles(): Promise<Profile[]> {
 
 export async function updateProfile(
   userId: string,
-  updates: Partial<Pick<Profile, 'full_name' | 'role' | 'can_view_all_docs'>>
+  updates: Partial<Pick<Profile, 'full_name' | 'role' | 'can_view_all_docs'>>,
 ): Promise<Profile> {
   const { data, error } = await supabase
     .from('profiles')
@@ -94,11 +94,7 @@ export async function listProjects(userId: string, role: Profile['role']): Promi
 }
 
 export async function getProject(projectId: string): Promise<Project | null> {
-  const { data, error } = await supabase
-    .from('projects')
-    .select('*')
-    .eq('id', projectId)
-    .single()
+  const { data, error } = await supabase.from('projects').select('*').eq('id', projectId).single()
   if (error) return null
   return data as Project
 }
@@ -106,7 +102,7 @@ export async function getProject(projectId: string): Promise<Project | null> {
 export async function createProject(
   name: string,
   description: string | null,
-  createdBy: string
+  createdBy: string,
 ): Promise<Project> {
   const { data, error } = await supabase
     .from('projects')
@@ -116,16 +112,19 @@ export async function createProject(
   if (error) throw new Error(error.message)
 
   // auto-add creator as owner
-  await supabase
+  const { error: memberError } = await supabase
     .from('project_members')
     .insert({ project_id: data.id, user_id: createdBy, role: 'owner' })
-
+  if (memberError) {
+    await supabase.from('projects').delete().eq('id', data.id)
+    throw new Error('Could not create project membership')
+  }
   return data as Project
 }
 
 export async function updateProject(
   projectId: string,
-  updates: Partial<Pick<Project, 'name' | 'description'>>
+  updates: Partial<Pick<Project, 'name' | 'description'>>,
 ): Promise<Project> {
   const { data, error } = await supabase
     .from('projects')
@@ -154,7 +153,7 @@ export async function listProjectMembers(projectId: string): Promise<ProjectMemb
 export async function addProjectMember(
   projectId: string,
   userId: string,
-  role: ProjectMember['role']
+  role: ProjectMember['role'],
 ): Promise<void> {
   const { error } = await supabase
     .from('project_members')
@@ -176,16 +175,26 @@ export async function removeProjectMember(projectId: string, userId: string): Pr
 export async function listDocuments(
   projectId: string,
   userId: string,
-  profile: Profile
+  profile: Profile,
 ): Promise<Document[]> {
   let query = supabase
     .from('documents')
-    .select('*, current_version:document_versions!fk_current_version(id,version_number,created_at,created_by,file_size,prompt_used), creator:profiles!documents_created_by_fkey(id,email,full_name)')
+    .select(
+      '*, current_version:document_versions!fk_current_version(id,version_number,created_at,created_by,file_size,prompt_used), creator:profiles!documents_created_by_fkey(id,email,full_name)',
+    )
     .eq('project_id', projectId)
     .order('updated_at', { ascending: false })
 
   if (profile.role === 'employee' && !profile.can_view_all_docs) {
-    query = query.eq('created_by', userId)
+    const { data: memberships, error: memberError } = await supabase
+      .from('project_members')
+      .select('project_id')
+      .eq('user_id', userId)
+    if (memberError) throw new Error('Could not verify project access')
+    const ids = (memberships ?? []).map((m: { project_id: string }) => m.project_id)
+    query = ids.length
+      ? query.or('created_by.eq.' + userId + ',project_id.in.(' + ids.join(',') + ')')
+      : query.eq('created_by', userId)
   }
 
   const { data, error } = await query
@@ -196,11 +205,21 @@ export async function listDocuments(
 export async function getAllDocuments(userId: string, profile: Profile): Promise<Document[]> {
   let query = supabase
     .from('documents')
-    .select('*, current_version:document_versions!fk_current_version(id,version_number,created_at,created_by), creator:profiles!documents_created_by_fkey(id,email,full_name)')
+    .select(
+      '*, current_version:document_versions!fk_current_version(id,version_number,created_at,created_by,file_size,prompt_used), creator:profiles!documents_created_by_fkey(id,email,full_name)',
+    )
     .order('updated_at', { ascending: false })
 
   if (profile.role === 'employee' && !profile.can_view_all_docs) {
-    query = query.eq('created_by', userId)
+    const { data: memberships, error: memberError } = await supabase
+      .from('project_members')
+      .select('project_id')
+      .eq('user_id', userId)
+    if (memberError) throw new Error('Could not verify project access')
+    const ids = (memberships ?? []).map((m: { project_id: string }) => m.project_id)
+    query = ids.length
+      ? query.or('created_by.eq.' + userId + ',project_id.in.(' + ids.join(',') + ')')
+      : query.eq('created_by', userId)
   }
 
   const { data, error } = await query
@@ -211,7 +230,9 @@ export async function getAllDocuments(userId: string, profile: Profile): Promise
 export async function getDocument(docId: string): Promise<Document | null> {
   const { data, error } = await supabase
     .from('documents')
-    .select('*, current_version:document_versions!fk_current_version(*), creator:profiles!documents_created_by_fkey(id,email,full_name)')
+    .select(
+      '*, current_version:document_versions!fk_current_version(*), creator:profiles!documents_created_by_fkey(id,email,full_name)',
+    )
     .eq('id', docId)
     .single()
   if (error) return null
@@ -233,7 +254,7 @@ export async function createDocument(
   projectId: string,
   createdBy: string,
   slug: string,
-  isPublic: boolean
+  isPublic: boolean,
 ): Promise<Document> {
   const { data, error } = await supabase
     .from('documents')
@@ -246,7 +267,7 @@ export async function createDocument(
 
 export async function updateDocumentCurrentVersion(
   docId: string,
-  versionId: string
+  versionId: string,
 ): Promise<void> {
   const { error } = await supabase
     .from('documents')
@@ -257,7 +278,7 @@ export async function updateDocumentCurrentVersion(
 
 export async function updateDocument(
   docId: string,
-  updates: Partial<Pick<Document, 'title' | 'is_public'>>
+  updates: Partial<Pick<Document, 'title' | 'is_public'>>,
 ): Promise<Document> {
   const { data, error } = await supabase
     .from('documents')
@@ -309,7 +330,7 @@ export async function insertVersion(
   fileSize: number,
   createdBy: string,
   promptUsed: string | null,
-  changeNote: string | null
+  changeNote: string | null,
 ): Promise<DocumentVersion> {
   const { data, error } = await supabase
     .from('document_versions')
@@ -333,7 +354,7 @@ export async function insertVersion(
 export async function insertViewLog(
   docId: string,
   versionId: string | null,
-  userId: string
+  userId: string,
 ): Promise<void> {
   await supabase
     .from('view_logs')
@@ -362,18 +383,23 @@ export async function toggleDocumentStar(userId: string, docId: string): Promise
     .maybeSingle()
 
   if (data) {
-    await supabase.from('document_stars').delete().eq('user_id', userId).eq('document_id', docId)
+    const { error } = await supabase
+      .from('document_stars')
+      .delete()
+      .eq('user_id', userId)
+      .eq('document_id', docId)
+    if (error) throw new Error(error.message)
     return false
   }
-  await supabase.from('document_stars').insert({ user_id: userId, document_id: docId })
+  const { error } = await supabase
+    .from('document_stars')
+    .insert({ user_id: userId, document_id: docId })
+  if (error) throw new Error(error.message)
   return true
 }
 
 export async function getStarredDocumentIds(userId: string): Promise<string[]> {
-  const { data } = await supabase
-    .from('document_stars')
-    .select('document_id')
-    .eq('user_id', userId)
+  const { data } = await supabase.from('document_stars').select('document_id').eq('user_id', userId)
   return (data ?? []).map((r: { document_id: string }) => r.document_id)
 }
 
@@ -383,12 +409,22 @@ export async function getStarredDocuments(userId: string, profile: Profile): Pro
 
   let query = supabase
     .from('documents')
-    .select('*, current_version:document_versions!fk_current_version(id,version_number,created_at,prompt_used), creator:profiles!documents_created_by_fkey(id,email,full_name)')
+    .select(
+      '*, current_version:document_versions!fk_current_version(id,version_number,created_at,prompt_used), creator:profiles!documents_created_by_fkey(id,email,full_name)',
+    )
     .in('id', ids)
     .order('updated_at', { ascending: false })
 
   if (profile.role === 'employee' && !profile.can_view_all_docs) {
-    query = query.eq('created_by', userId)
+    const { data: memberships, error: memberError } = await supabase
+      .from('project_members')
+      .select('project_id')
+      .eq('user_id', userId)
+    if (memberError) throw new Error('Could not verify project access')
+    const ids = (memberships ?? []).map((m: { project_id: string }) => m.project_id)
+    query = ids.length
+      ? query.or('created_by.eq.' + userId + ',project_id.in.(' + ids.join(',') + ')')
+      : query.eq('created_by', userId)
   }
 
   const { data, error } = await query
@@ -398,7 +434,9 @@ export async function getStarredDocuments(userId: string, profile: Profile): Pro
 
 // ─── Team Overview ────────────────────────────────────────────────────────────
 
-export async function getTeamOverview(): Promise<Array<{ profile: Profile; documents: Document[]; doc_count: number }>> {
+export async function getTeamOverview(): Promise<
+  Array<{ profile: Profile; documents: Document[]; doc_count: number }>
+> {
   const profiles = await listProfiles()
 
   const results = await Promise.all(
@@ -406,7 +444,9 @@ export async function getTeamOverview(): Promise<Array<{ profile: Profile; docum
       const [docsRes, countRes] = await Promise.all([
         supabase
           .from('documents')
-          .select('*, current_version:document_versions!fk_current_version(id,version_number,created_at,prompt_used)')
+          .select(
+            '*, current_version:document_versions!fk_current_version(id,version_number,created_at,prompt_used)',
+          )
           .eq('created_by', profile.id)
           .order('updated_at', { ascending: false })
           .limit(6),
@@ -420,7 +460,7 @@ export async function getTeamOverview(): Promise<Array<{ profile: Profile; docum
         documents: (docsRes.data ?? []) as Document[],
         doc_count: countRes.count ?? 0,
       }
-    })
+    }),
   )
 
   return results
@@ -432,7 +472,7 @@ export async function createKudos(
   fromUserId: string,
   toUserId: string,
   message: string,
-  emoji: string
+  emoji: string,
 ): Promise<Kudos> {
   const { data, error } = await supabase
     .from('kudos')

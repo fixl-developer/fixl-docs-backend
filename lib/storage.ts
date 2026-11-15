@@ -2,7 +2,7 @@ import { createClient } from '@supabase/supabase-js'
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
+  process.env.SUPABASE_SERVICE_ROLE_KEY!,
 )
 
 const BUCKET = process.env.STORAGE_BUCKET ?? 'reports'
@@ -10,7 +10,7 @@ const BUCKET = process.env.STORAGE_BUCKET ?? 'reports'
 async function upload(key: string, buf: Buffer): Promise<void> {
   const { error } = await supabase.storage.from(BUCKET).upload(key, buf, {
     contentType: 'text/html; charset=utf-8',
-    upsert: true,
+    upsert: false,
   })
 
   // If bucket doesn't exist, create it and retry once
@@ -18,7 +18,7 @@ async function upload(key: string, buf: Buffer): Promise<void> {
     await supabase.storage.createBucket(BUCKET, { public: false })
     const { error: retryErr } = await supabase.storage.from(BUCKET).upload(key, buf, {
       contentType: 'text/html; charset=utf-8',
-      upsert: true,
+      upsert: false,
     })
     if (retryErr) throw new Error(`Storage upload failed: ${retryErr.message}`)
     return

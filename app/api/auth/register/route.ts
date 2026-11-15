@@ -7,8 +7,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Name, email and password are required' }, { status: 400 })
   }
 
-  if (body.password.length < 6) {
-    return NextResponse.json({ error: 'Password must be at least 6 characters' }, { status: 400 })
+  if (typeof body.password !== 'string' || body.password.length < 8) {
+    return NextResponse.json({ error: 'Password must be at least 8 characters' }, { status: 400 })
   }
 
   const supabase = createServiceClient()
