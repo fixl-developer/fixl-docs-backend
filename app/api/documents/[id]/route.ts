@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthProfile, requireAuth } from '@/lib/auth'
-import { getDocument, updateDocument, insertViewLog } from '@/lib/db'
+import { getDocument, updateDocument, insertViewLog, logAuditEvent } from '@/lib/db'
 import { createServiceClient } from '@/lib/supabase-server'
 
 interface Params { params: Promise<{ id: string }> }
@@ -52,8 +52,21 @@ export async function DELETE(req: NextRequest, { params }: Params) {
   if (!canDelete) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
   const supabase = createServiceClient()
-  const { error } = await supabase.from('documents').delete().eq('id', id)
+  // Soft delete — set deleted_at so managers can restore from trash
+  const { error } = await supabase
+    .from('documents')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('id', id)
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+
+  logAuditEvent({
+    eventType: 'document.deleted',
+    actorId: profile!.id,
+    resourceType: 'document',
+    resourceId: id,
+    resourceTitle: doc.title,
+    metadata: { project_id: doc.project_id },
+  })
 
   return new NextResponse(null, { status: 204 })
 }

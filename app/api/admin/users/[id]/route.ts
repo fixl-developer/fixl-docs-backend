@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthProfile, requireRole } from '@/lib/auth'
-import { updateProfile } from '@/lib/db'
+import { updateProfile, logAuditEvent } from '@/lib/db'
 import type { UpdateUserBody } from '@/types/platform'
 
 interface Params { params: Promise<{ id: string }> }
@@ -21,5 +21,27 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   if (body.role && profile!.role === 'founder') updates.role = body.role
 
   const updated = await updateProfile(id, updates)
+
+  if (updates.role) {
+    logAuditEvent({
+      eventType: 'user.role_changed',
+      actorId: profile!.id,
+      resourceType: 'user',
+      resourceId: id,
+      resourceTitle: updated.full_name ?? updated.email,
+      metadata: { new_role: updates.role },
+    })
+  }
+  if (updates.can_view_all_docs !== undefined) {
+    logAuditEvent({
+      eventType: 'user.access_changed',
+      actorId: profile!.id,
+      resourceType: 'user',
+      resourceId: id,
+      resourceTitle: updated.full_name ?? updated.email,
+      metadata: { can_view_all_docs: updates.can_view_all_docs },
+    })
+  }
+
   return NextResponse.json(updated)
 }

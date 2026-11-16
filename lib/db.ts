@@ -1,6 +1,6 @@
 import { createClient } from '@supabase/supabase-js'
 import type { Snippet } from '@/types/snippet'
-import type { Profile, Project, ProjectMember, Document, DocumentVersion, ViewLog, Kudos } from '@/types/platform'
+import type { Profile, Project, ProjectMember, Document, DocumentVersion, ViewLog, Kudos, ConnectedProject, ProjectFile, Message, ConversationSummary, AuditEvent } from '@/types/platform'
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -452,4 +452,235 @@ export async function getKudosForUser(userId: string): Promise<Kudos[]> {
     .limit(5)
   if (error) return []
   return data as Kudos[]
+}
+
+// ─── Connected Projects ───────────────────────────────────────────────────────
+
+export async function listConnectedProjects(userId: string, role: Profile['role']): Promise<ConnectedProject[]> {
+  let query = supabase
+    .from('connected_projects')
+    .select('*')
+    .order('updated_at', { ascending: false })
+
+  if (role === 'employee') {
+    query = query.eq('created_by', userId)
+  }
+
+  const { data, error } = await query
+  if (error) throw new Error(error.message)
+  return data as ConnectedProject[]
+}
+
+export async function getConnectedProject(id: string): Promise<ConnectedProject | null> {
+  const { data, error } = await supabase
+    .from('connected_projects')
+    .select('*')
+    .eq('id', id)
+    .single()
+  if (error) return null
+  return data as ConnectedProject
+}
+
+export async function createConnectedProject(
+  name: string,
+  type: 'local' | 'github',
+  createdBy: string,
+  projectId: string | null,
+  githubRepoUrl: string | null,
+  githubBranch: string,
+  documentId: string | null = null
+): Promise<ConnectedProject> {
+  const { data, error } = await supabase
+    .from('connected_projects')
+    .insert({ name, type, created_by: createdBy, project_id: projectId, github_repo_url: githubRepoUrl, github_branch: githubBranch, document_id: documentId })
+    .select()
+    .single()
+  if (error) throw new Error(error.message)
+  return data as ConnectedProject
+}
+
+export async function deleteConnectedProject(id: string): Promise<void> {
+  const { error } = await supabase.from('connected_projects').delete().eq('id', id)
+  if (error) throw new Error(error.message)
+}
+
+export async function updateConnectedProjectAfterSync(
+  id: string,
+  documentId: string,
+  fileCount: number,
+  projectId?: string
+): Promise<void> {
+  const updates: Record<string, unknown> = {
+    document_id: documentId,
+    file_count: fileCount,
+    last_synced_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  }
+  if (projectId) updates.project_id = projectId
+  const { error } = await supabase.from('connected_projects').update(updates).eq('id', id)
+  if (error) throw new Error(error.message)
+}
+
+export async function getProjectFiles(connectedProjectId: string): Promise<ProjectFile[]> {
+  const { data, error } = await supabase
+    .from('project_files')
+    .select('*')
+    .eq('connected_project_id', connectedProjectId)
+  if (error) return []
+  return data as ProjectFile[]
+}
+
+export async function upsertProjectFiles(
+  connectedProjectId: string,
+  files: Array<{ path: string; hash: string; size: number }>
+): Promise<void> {
+  const rows = files.map(f => ({
+    connected_project_id: connectedProjectId,
+    file_path: f.path,
+    content_hash: f.hash,
+    file_size: f.size,
+    last_synced_at: new Date().toISOString(),
+  }))
+  const { error } = await supabase
+    .from('project_files')
+    .upsert(rows, { onConflict: 'connected_project_id,file_path' })
+  if (error) throw new Error(error.message)
+}
+
+// ─── Messages ─────────────────────────────────────────────────────────────────
+
+export async function getConversations(userId: string): Promise<ConversationSummary[]> {
+  const { data } = await supabase
+    .from('messages')
+    .select('*, from_user:from_user_id(id,email,full_name,role), to_user:to_user_id(id,email,full_name,role)')
+    .or(`from_user_id.eq.${userId},to_user_id.eq.${userId}`)
+    .order('created_at', { ascending: false })
+    .limit(300)
+
+  if (!data) return []
+
+  const seen = new Map<string, ConversationSummary>()
+
+  for (const msg of data as Message[]) {
+    const isFromMe = msg.from_user_id === userId
+    const otherId = isFromMe ? msg.to_user_id : msg.from_user_id
+    const otherUser = (isFromMe ? msg.to_user : msg.from_user) as Pick<Profile, 'id' | 'email' | 'full_name' | 'role'>
+    if (!otherUser) continue
+
+    if (!seen.has(otherId)) {
+      seen.set(otherId, {
+        user: otherUser,
+        last_message: msg.content,
+        last_message_at: msg.created_at,
+        unread_count: 0,
+        last_from_me: isFromMe,
+      })
+    }
+    if (!isFromMe && !msg.read_at) {
+      seen.get(otherId)!.unread_count++
+    }
+  }
+
+  return Array.from(seen.values())
+}
+
+export async function getThread(userId: string, otherId: string): Promise<Message[]> {
+  const { data, error } = await supabase
+    .from('messages')
+    .select('*, from_user:from_user_id(id,email,full_name,role)')
+    .or(
+      `and(from_user_id.eq.${userId},to_user_id.eq.${otherId}),and(from_user_id.eq.${otherId},to_user_id.eq.${userId})`
+    )
+    .order('created_at', { ascending: true })
+    .limit(100)
+  if (error) return []
+  return data as Message[]
+}
+
+export async function sendMessage(fromUserId: string, toUserId: string, content: string): Promise<Message> {
+  const { data, error } = await supabase
+    .from('messages')
+    .insert({ from_user_id: fromUserId, to_user_id: toUserId, content })
+    .select('*, from_user:from_user_id(id,email,full_name,role)')
+    .single()
+  if (error) throw new Error(error.message)
+  return data as Message
+}
+
+export async function markThreadRead(toUserId: string, fromUserId: string): Promise<void> {
+  await supabase
+    .from('messages')
+    .update({ read_at: new Date().toISOString() })
+    .eq('to_user_id', toUserId)
+    .eq('from_user_id', fromUserId)
+    .is('read_at', null)
+}
+
+export async function getUnreadCount(userId: string): Promise<number> {
+  const { count } = await supabase
+    .from('messages')
+    .select('id', { count: 'exact', head: true })
+    .eq('to_user_id', userId)
+    .is('read_at', null)
+  return count ?? 0
+}
+
+// ─── Audit Events ─────────────────────────────────────────────────────────────
+
+export async function logAuditEvent(params: {
+  eventType: string
+  actorId: string | null
+  resourceType: string
+  resourceId?: string | null
+  resourceTitle?: string | null
+  metadata?: Record<string, unknown>
+}): Promise<void> {
+  try {
+    await supabase.from('audit_events').insert({
+      event_type: params.eventType,
+      actor_id: params.actorId,
+      resource_type: params.resourceType,
+      resource_id: params.resourceId ?? null,
+      resource_title: params.resourceTitle ?? null,
+      metadata: params.metadata ?? {},
+    })
+  } catch {
+    // audit failure must never break the main flow
+  }
+}
+
+export async function getAuditEvents(
+  limit = 100,
+  offset = 0,
+  filters?: { eventType?: string; actorId?: string; resourceId?: string }
+): Promise<AuditEvent[]> {
+  let query = supabase
+    .from('audit_events')
+    .select('*, actor:profiles!audit_events_actor_id_fkey(id, email, full_name, role)')
+    .order('created_at', { ascending: false })
+    .range(offset, offset + limit - 1)
+
+  if (filters?.eventType) query = query.eq('event_type', filters.eventType)
+  if (filters?.actorId) query = query.eq('actor_id', filters.actorId)
+  if (filters?.resourceId) query = query.eq('resource_id', filters.resourceId)
+
+  const { data, error } = await query
+  if (error) throw new Error(error.message)
+  return data as AuditEvent[]
+}
+
+export async function deleteRemovedProjectFiles(
+  connectedProjectId: string,
+  currentPaths: string[]
+): Promise<void> {
+  if (!currentPaths.length) {
+    await supabase.from('project_files').delete().eq('connected_project_id', connectedProjectId)
+    return
+  }
+  const { error } = await supabase
+    .from('project_files')
+    .delete()
+    .eq('connected_project_id', connectedProjectId)
+    .not('file_path', 'in', `(${currentPaths.map(p => `"${p}"`).join(',')})`)
+  if (error) throw new Error(error.message)
 }

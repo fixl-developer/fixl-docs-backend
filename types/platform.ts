@@ -102,3 +102,78 @@ export interface Kudos {
   created_at: string
   from_user?: Pick<Profile, 'id' | 'email' | 'full_name'>
 }
+
+export interface Message {
+  id: string
+  from_user_id: string
+  to_user_id: string
+  content: string
+  read_at: string | null
+  created_at: string
+  from_user?: Pick<Profile, 'id' | 'email' | 'full_name' | 'role'>
+  to_user?: Pick<Profile, 'id' | 'email' | 'full_name' | 'role'>
+}
+
+export interface ConversationSummary {
+  user: Pick<Profile, 'id' | 'email' | 'full_name' | 'role'>
+  last_message: string
+  last_message_at: string
+  unread_count: number
+  last_from_me: boolean
+}
+
+export interface ConnectedProject {
+  id: string
+  name: string
+  type: 'local' | 'github'
+  github_repo_url: string | null
+  github_branch: string
+  document_id: string | null
+  project_id: string | null
+  created_by: string | null
+  last_synced_at: string | null
+  file_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface ProjectFile {
+  id: string
+  connected_project_id: string
+  file_path: string
+  content_hash: string
+  file_size: number
+  last_synced_at: string
+}
+
+export interface SyncFile {
+  path: string
+  content: string
+  size: number
+}
+
+export interface CreateConnectedProjectBody {
+  name: string
+  type: 'local' | 'github'
+  github_repo_url?: string
+  github_branch?: string
+  project_id?: string
+  document_id?: string
+}
+
+export interface SyncBody {
+  files: SyncFile[]
+  prompt?: string
+}
+
+export interface AuditEvent {
+  id: string
+  event_type: string
+  actor_id: string | null
+  resource_type: string | null
+  resource_id: string | null
+  resource_title: string | null
+  metadata: Record<string, unknown>
+  created_at: string
+  actor?: Pick<Profile, 'id' | 'email' | 'full_name' | 'role'>
+}

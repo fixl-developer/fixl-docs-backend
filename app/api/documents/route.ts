@@ -6,6 +6,7 @@ import {
   insertVersion,
   updateDocumentCurrentVersion,
   getStarredDocumentIds,
+  logAuditEvent,
 } from '@/lib/db'
 import { uploadObject } from '@/lib/storage'
 import { generateDocumentSlug } from '@/lib/slugs'
@@ -71,6 +72,15 @@ export async function POST(req: NextRequest) {
     )
 
     await updateDocumentCurrentVersion(doc.id, version.id)
+
+    logAuditEvent({
+      eventType: 'document.created',
+      actorId: profile!.id,
+      resourceType: 'document',
+      resourceId: doc.id,
+      resourceTitle: doc.title,
+      metadata: { project_id: body.project_id },
+    })
 
     const appUrl = process.env.FRONTEND_URL ?? ''
     return NextResponse.json(

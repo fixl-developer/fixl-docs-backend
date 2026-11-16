@@ -22,13 +22,27 @@ const ALLOWED_MODELS = new Set([
 ])
 
 const SYSTEM_PROMPT = `You are an HTML report generator for an internal office platform.
-Your task is to generate or update clean, self-contained HTML documents.
-Rules:
-- Return ONLY valid HTML. No markdown, no code fences, no explanation.
-- The HTML must be complete (include <html>, <head>, <body>).
+
+IMPORTANT: Only respond to requests that ask you to create or modify an HTML document.
+
+If the user sends a greeting, question, off-topic message, or anything that is NOT a document change or creation request, respond with:
+<thinking>One sentence explaining you can only help with document tasks.</thinking>
+<noop>A short, friendly message telling the user what you can help with. Example: "I can only help you create or update documents. Try describing a change you'd like to make to this document."</noop>
+
+For actual document requests, respond in exactly this format:
+<thinking>
+One or two sentences describing what you will do. Be specific and natural. Example: "I'll add a revenue chart in the header section and update the Q3 figures to reflect the new data." Keep it under 40 words.
+</thinking>
+<!DOCTYPE html>
+<html>
+...rest of the complete HTML document...
+
+Rules for the HTML:
+- Return a complete, valid HTML document (with <html>, <head>, <body>).
 - Use inline CSS only — no external stylesheets or CDN links.
 - Charts, tables, and data visualizations should use pure HTML/CSS or inline SVG.
-- Keep the document professional and readable.`
+- Keep the document professional and readable.
+- No markdown, no code fences, no extra explanation outside the <thinking> tag.`
 
 function jsonEvent(data: object): Uint8Array {
   return new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`)
@@ -72,12 +86,10 @@ export async function POST(req: NextRequest, { params }: Params) {
       const send = (data: object) => controller.enqueue(jsonEvent(data))
 
       try {
-        let accumulated = ''
         let inputTokens = 0
         let outputTokens = 0
         let finalModel = model
 
-        // Use stream: true with messages.create — returns a raw async iterable
         const claudeStream = await anthropic.messages.create({
           model,
           max_tokens: 8192,
@@ -85,6 +97,19 @@ export async function POST(req: NextRequest, { params }: Params) {
           messages: [{ role: 'user', content: userMessage }],
           stream: true,
         })
+
+        // ── Stream parser ──────────────────────────────────────────────────────
+        let fullBuffer = ''
+        let sentThinkingLen = 0
+        let sentHtmlLen = 0
+        let thinkingDone = false
+        let noopDetected = false
+        let htmlAccumulated = ''
+
+        const THINK_OPEN  = '<thinking>'
+        const THINK_CLOSE = '</thinking>'
+        const NOOP_OPEN   = '<noop>'
+        const NOOP_CLOSE  = '</noop>'
 
         for await (const event of claudeStream) {
           if (event.type === 'message_start') {
@@ -95,16 +120,66 @@ export async function POST(req: NextRequest, { params }: Params) {
             event.type === 'content_block_delta' &&
             event.delta.type === 'text_delta'
           ) {
-            const text = event.delta.text
-            accumulated += text
-            send({ chunk: text })
+            fullBuffer += event.delta.text
+
+            const thinkStart = fullBuffer.indexOf(THINK_OPEN)
+            const thinkEnd   = fullBuffer.indexOf(THINK_CLOSE)
+            const noopStart  = fullBuffer.indexOf(NOOP_OPEN)
+            const noopEnd    = fullBuffer.indexOf(NOOP_CLOSE)
+
+            // ── Thinking phase ──────────────────────────────────────────────
+            if (!thinkingDone) {
+              if (thinkStart === -1) continue
+
+              const rawThinking = thinkEnd !== -1
+                ? fullBuffer.slice(thinkStart + THINK_OPEN.length, thinkEnd)
+                : fullBuffer.slice(thinkStart + THINK_OPEN.length, fullBuffer.length - THINK_CLOSE.length)
+
+              if (rawThinking.length > sentThinkingLen) {
+                send({ thinkChunk: rawThinking.slice(sentThinkingLen) })
+                sentThinkingLen = rawThinking.length
+              }
+
+              if (thinkEnd !== -1) {
+                thinkingDone = true
+                send({ thinkDone: true })
+              }
+            }
+
+            // ── Noop detection (after thinking) ────────────────────────────
+            if (thinkingDone && !noopDetected && noopEnd !== -1 && noopStart !== -1) {
+              noopDetected = true
+              const noopMsg = fullBuffer.slice(noopStart + NOOP_OPEN.length, noopEnd).trim()
+              send({ noop: true, message: noopMsg })
+              controller.close()
+              return
+            }
+
+            // ── HTML streaming ─────────────────────────────────────────────
+            if (thinkingDone && !noopDetected) {
+              const afterClose = fullBuffer.slice(fullBuffer.indexOf(THINK_CLOSE) + THINK_CLOSE.length)
+              const htmlPart = sentHtmlLen === 0 ? afterClose.replace(/^\s+/, '') : afterClose
+              if (htmlPart.length > sentHtmlLen) {
+                const newChunk = htmlPart.slice(sentHtmlLen)
+                htmlAccumulated += newChunk
+                send({ chunk: newChunk })
+                sentHtmlLen = htmlPart.length
+              }
+            }
           }
           if (event.type === 'message_delta') {
             outputTokens = event.usage.output_tokens
           }
         }
 
-        const rawHtml = accumulated
+        if (noopDetected) return
+
+        // ── Fallback: no thinking wrapper ──────────────────────────────────
+        if (!thinkingDone && fullBuffer.trim()) {
+          htmlAccumulated = fullBuffer.trim()
+        }
+
+        const rawHtml = htmlAccumulated
           .replace(/^```html\s*/i, '')
           .replace(/^```\s*/i, '')
           .replace(/\s*```$/, '')
