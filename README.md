@@ -56,6 +56,20 @@ npm test
 npm run build
 ```
 
-Seven Node tests cover role decisions, protected routes, public revocation, retired URL fetching, incomplete Claude output, immutable object keys, and the actual SQL function. SQL runs in PGlite with a minimal fixture schema; service boundaries are mocked in route tests. These checks do not replace a real Supabase/Anthropic staging smoke test.
+Fifteen Node tests cover role decisions, protected routes, public revocation, retired URL fetching, incomplete Claude output, draft persistence, source filtering and isolation, GitHub commit consistency and OAuth account binding, immutable object keys, and both SQL migrations. SQL runs in PGlite with a minimal fixture schema; service boundaries are mocked in route tests. These checks do not replace a real Supabase/Anthropic/GitHub staging smoke test.
 
 See [operational limits](docs/operational-limits.md) before rollout.
+
+## Source-informed workspace
+
+The new `/api/documents/:id/workspace` endpoints persist private per-editor sources and conversations. `/workspace/generate` retrieves relevant source excerpts and saves an unapplied draft; `/workspace/apply` writes an accepted version and clears the draft in one database transaction. `GET /workspace` never returns raw source file content.
+
+Apply `supabase/migrations/202611160001_artifact_context_workspace.sql` **after** the existing atomic-version migration. It creates private workspace/source tables, GitHub connection and one-time OAuth state tables, and service-role-only source/apply functions. No live migration is performed by this change.
+
+Configure `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, and a stable 64-hex-character `GITHUB_TOKEN_ENCRYPTION_KEY` on the backend. Register a GitHub App with Contents read-only, install it on selected repositories, and set its callback to `FRONTEND_URL/integrations/github/callback`. User authorization is bound to the signed-in Fixl account with one-time state and PKCE. Tokens are encrypted with AES-256-GCM and never returned to the browser. Expired tokens require reconnecting; this release does not store refresh tokens.
+
+Source mutations and GitHub browsing are limited to 40 requests per ten minutes per user using Redis; production fails closed if unavailable. GitHub files are read from blob SHAs in one resolved commit, and truncated trees, moved branches during selection, symlinks, unsupported/oversized files, and common credential patterns are rejected. Local snapshots use the same content policy. GitHub attachments can take longer than a normal API request; allow the workspace route's 180-second runtime.
+
+The legacy connected-project sync endpoint now opens an artifact workspace and returns JSON `{documentId}`. It rejects the old streaming file-upload body. The paired frontend uses the new source picker and explicit draft acceptance. Deploy this release pair together. The legacy `claude-update` endpoint again has draft semantics; no code-sync path automatically publishes AI output.
+
+See [source workspace operations](docs/source-workspace.md) for limits and validation.

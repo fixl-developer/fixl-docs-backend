@@ -53,3 +53,58 @@ test('Claude completes only full HTML as an unsaved draft; truncated generation 
     else process.env.NODE_ENV = before.node
   }
 })
+
+test('completed drafts are persisted before success is emitted and persistence failure cannot report success', async () => {
+  const before = { key: process.env.ANTHROPIC_API_KEY, node: process.env.NODE_ENV }
+  process.env.ANTHROPIC_API_KEY = 'test-only-placeholder'
+  process.env.NODE_ENV = 'test'
+  const html = '<html><body>draft</body></html>'
+  let persisted = 0,
+    failures = 0
+  try {
+    const response = await createGenerator('end_turn', html)(
+      new Request('https://test.example'),
+      'persist-test',
+      { prompt: 'Update' },
+      undefined,
+      {
+        context: 'source reference',
+        history: [{ role: 'user', content: 'Earlier request' }],
+        onComplete: async (source) => {
+          assert.equal(source, html)
+          persisted++
+          return { draftId: 'draft-1' }
+        },
+        onFailure: async () => {
+          failures++
+        },
+      },
+    )
+    assert.match(await response.text(), /"draftId":"draft-1"/)
+    assert.equal(persisted, 1)
+    assert.equal(failures, 0)
+    const failed = await createGenerator('end_turn', html)(
+      new Request('https://test.example'),
+      'persist-test',
+      { prompt: 'Update' },
+      undefined,
+      {
+        onComplete: async () => {
+          throw new Error('Database unavailable')
+        },
+        onFailure: async () => {
+          failures++
+        },
+      },
+    )
+    const events = await failed.text()
+    assert.match(events, /"error"/)
+    assert.doesNotMatch(events, /"done":true/)
+    assert.equal(failures, 1)
+  } finally {
+    if (before.key === undefined) delete process.env.ANTHROPIC_API_KEY
+    else process.env.ANTHROPIC_API_KEY = before.key
+    if (before.node === undefined) delete process.env.NODE_ENV
+    else process.env.NODE_ENV = before.node
+  }
+})
