@@ -3,7 +3,9 @@ import { getAuthProfile, requireRole } from '@/lib/auth'
 import { updateProfile, logAuditEvent } from '@/lib/db'
 import type { UpdateUserBody } from '@/types/platform'
 
-interface Params { params: Promise<{ id: string }> }
+interface Params {
+  params: Promise<{ id: string }>
+}
 
 export async function PATCH(req: NextRequest, { params }: Params) {
   const profile = await getAuthProfile(req)
@@ -14,6 +16,12 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 
   // founder can change roles; manager can only toggle can_view_all_docs
   const body: UpdateUserBody = await req.json().catch(() => ({}))
+  if (body.role && !['employee', 'manager', 'founder'].includes(body.role))
+    return NextResponse.json({ error: 'Invalid role' }, { status: 400 })
+  if (body.can_view_all_docs !== undefined && typeof body.can_view_all_docs !== 'boolean')
+    return NextResponse.json({ error: 'Invalid access setting' }, { status: 400 })
+  if (id === profile!.id && body.role && body.role !== profile!.role)
+    return NextResponse.json({ error: 'Ask another founder to change your role.' }, { status: 409 })
   const updates: UpdateUserBody = {}
 
   if (body.full_name !== undefined) updates.full_name = body.full_name
